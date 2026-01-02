@@ -1,25 +1,55 @@
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, ClassVar, Dict, Optional
+from typing import Any, ClassVar, Dict, Optional, TYPE_CHECKING
 
-from daytona import Daytona, DaytonaConfig, Sandbox, SandboxState
 from pydantic import Field
 
 from app.config import config
-from app.daytona.sandbox import create_sandbox, start_supervisord_session
 from app.tool.base import BaseTool
 from app.utils.files_utils import clean_path
 from app.utils.logger import logger
 
 
-# load_dotenv()
+# Daytona is an optional dependency. Import lazily so the project can start without it.
+try:
+    from daytona import Daytona, DaytonaConfig, Sandbox, SandboxState  # type: ignore
+
+    _DAYTONA_AVAILABLE = True
+except ModuleNotFoundError:  # pragma: no cover
+    _DAYTONA_AVAILABLE = False
+    Daytona = None  # type: ignore
+    DaytonaConfig = None  # type: ignore
+    Sandbox = Any  # type: ignore
+    SandboxState = Any  # type: ignore
+
+_daytona_client: Optional["Daytona"] = None
+
+
+def _require_daytona() -> None:
+    if not _DAYTONA_AVAILABLE:
+        raise RuntimeError(
+            "Optional dependency 'daytona' is not installed. "
+            "Install it if you want to use sandbox tools (Daytona integration)."
+        )
+    if not getattr(config.daytona, "daytona_api_key", None):
+        raise RuntimeError(
+            "Daytona is not configured. Set [daytona].daytona_api_key in config/config.toml "
+            "if you want to use sandbox tools."
+        )
+
+
+def _get_daytona_client() -> "Daytona":
+    global _daytona_client
+    _require_daytona()
+    if _daytona_client is None:
 daytona_settings = config.daytona
-daytona_config = DaytonaConfig(
+        daytona_config = DaytonaConfig(  # type: ignore[misc]
     api_key=daytona_settings.daytona_api_key,
     server_url=daytona_settings.daytona_server_url,
     target=daytona_settings.daytona_target,
 )
-daytona = Daytona(daytona_config)
+        _daytona_client = Daytona(daytona_config)  # type: ignore[misc]
+    return _daytona_client
 
 
 @dataclass
@@ -70,9 +100,12 @@ class SandboxToolsBase(BaseTool):
 
     async def _ensure_sandbox(self) -> Sandbox:
         """Ensure we have a valid sandbox instance, retrieving it from the project if needed."""
+        _require_daytona()
         if self._sandbox is None:
             # Get or start the sandbox
             try:
+                from app.daytona.sandbox import create_sandbox
+
                 self._sandbox = create_sandbox(password=config.daytona.VNC_password)
                 # Log URLs if not already printed
                 if not SandboxToolsBase._urls_printed:
@@ -103,12 +136,15 @@ class SandboxToolsBase(BaseTool):
             ):
                 logger.info(f"Sandbox is in {self._sandbox.state} state. Starting...")
                 try:
+                    daytona = _get_daytona_client()
                     daytona.start(self._sandbox)
                     # Wait a moment for the sandbox to initialize
                     # sleep(5)
                     # Refresh sandbox state after starting
 
                     # Start supervisord in a session when restarting
+                    from app.daytona.sandbox import start_supervisord_session
+
                     start_supervisord_session(self._sandbox)
                 except Exception as e:
                     logger.error(f"Error starting sandbox: {e}")

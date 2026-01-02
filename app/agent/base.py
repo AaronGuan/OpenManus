@@ -128,6 +128,10 @@ class BaseAgent(BaseModel, ABC):
         if self.state != AgentState.IDLE:
             raise RuntimeError(f"Cannot run agent from state: {self.state}")
 
+        # Reset per-run step counter so interactive multi-turn sessions don't
+        # accumulate steps across turns.
+        self.current_step = 0
+
         if request:
             self.update_memory("user", request)
 

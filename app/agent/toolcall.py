@@ -38,19 +38,22 @@ class ToolCallAgent(ReActAgent):
 
     async def think(self) -> bool:
         """Process current state and decide next actions using tools"""
-        if self.next_step_prompt:
-            user_msg = Message.user_message(self.next_step_prompt)
-            self.messages += [user_msg]
+        # NOTE:
+        # `next_step_prompt` is an instruction/context for the agent itself.
+        # Treat it as a system message (not a user message), otherwise it will
+        # override the real user request every step and cause repetitive loops.
 
         try:
             # Get response with tool options
+            system_msgs = []
+            if self.system_prompt:
+                system_msgs.append(Message.system_message(self.system_prompt))
+            if self.next_step_prompt:
+                system_msgs.append(Message.system_message(self.next_step_prompt))
+
             response = await self.llm.ask_tool(
                 messages=self.messages,
-                system_msgs=(
-                    [Message.system_message(self.system_prompt)]
-                    if self.system_prompt
-                    else None
-                ),
+                system_msgs=system_msgs or None,
                 tools=self.available_tools.to_params(),
                 tool_choice=self.tool_choices,
             )
@@ -100,7 +103,9 @@ class ToolCallAgent(ReActAgent):
                     )
                 if content:
                     self.memory.add_message(Message.assistant_message(content))
+                    self.state = AgentState.FINISHED
                     return True
+                self.state = AgentState.FINISHED
                 return False
 
             # Create and add assistant message
@@ -116,7 +121,9 @@ class ToolCallAgent(ReActAgent):
 
             # For 'auto' mode, continue with content if no commands but content exists
             if self.tool_choices == ToolChoice.AUTO and not self.tool_calls:
-                return bool(content)
+                # We have a final assistant answer (no tools needed) → finish.
+                self.state = AgentState.FINISHED
+                return False
 
             return bool(self.tool_calls)
         except Exception as e:
@@ -242,9 +249,10 @@ class ToolCallAgent(ReActAgent):
                     )
         logger.info(f"✨ Cleanup complete for agent '{self.name}'.")
 
-    async def run(self, request: Optional[str] = None) -> str:
-        """Run the agent with cleanup when done."""
+    async def run(self, request: Optional[str] = None, cleanup: bool = True) -> str:
+        """Run the agent. Optionally keep resources/connections for multi-turn chat."""
         try:
             return await super().run(request)
         finally:
+            if cleanup:
             await self.cleanup()

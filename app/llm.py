@@ -1,4 +1,5 @@
 import math
+import time
 from typing import Dict, List, Optional, Union
 
 import tiktoken
@@ -32,14 +33,79 @@ from app.schema import (
 
 
 REASONING_MODELS = ["o1", "o3-mini"]
+
+
+def _uses_max_completion_tokens(model: str) -> bool:
+    """
+    Some models (e.g. GPT-5.* and certain reasoning models) do not support `max_tokens`
+    on Chat Completions and require `max_completion_tokens` instead.
+    """
+    return model in REASONING_MODELS or model.startswith("gpt-5")
+
+
 MULTIMODAL_MODELS = [
     "gpt-4-vision-preview",
     "gpt-4o",
     "gpt-4o-mini",
+    # GPT-5.2 family (enable image inputs)
+    "gpt-5.2",
+    "gpt-5.2-chat-latest",
+    "gpt-5.2-2025-12-11",
+    "gpt-5.2-pro",
+    "gpt-5.2-pro-2025-12-11",
     "claude-3-opus-20240229",
     "claude-3-sonnet-20240229",
     "claude-3-haiku-20240307",
 ]
+
+
+class _FallbackTokenizer:
+    """
+    Minimal tokenizer fallback used when tiktoken encodings cannot be loaded.
+    This keeps the app running (token counting becomes approximate).
+    """
+
+    def encode(self, text: str):
+        # Approximate: count unicode codepoints as "tokens"
+        return [] if not text else list(text)
+
+
+def _init_tokenizer(model: str):
+    """
+    Initialize a tokenizer with retries.
+    Newer/unknown models may not be mapped by tiktoken yet; additionally, the first
+    load may require downloading encoding files (network can be flaky on Windows).
+    """
+    last_err: Exception | None = None
+
+    # Heuristic: newer OpenAI chat models generally work well with o200k_base.
+    preferred_enc = (
+        "o200k_base"
+        if model.startswith(("gpt-5", "gpt-4.1", "gpt-4o", "o1", "o3", "o4"))
+        else "cl100k_base"
+    )
+
+    for attempt in range(3):
+        try:
+            return tiktoken.encoding_for_model(model)
+        except KeyError as e:
+            last_err = e
+        except Exception as e:
+            last_err = e
+
+        for enc_name in (preferred_enc, "cl100k_base", "o200k_base"):
+            try:
+                return tiktoken.get_encoding(enc_name)
+            except Exception as e:
+                last_err = e
+
+        time.sleep(0.5 * (2**attempt))
+
+    logger.warning(
+        f"Failed to initialize tiktoken encoding after retries for model '{model}'. "
+        f"Falling back to approximate tokenizer. Last error: {last_err}"
+    )
+    return _FallbackTokenizer()
 
 
 class TokenCounter:
@@ -207,11 +273,7 @@ class LLM:
             )
 
             # Initialize tokenizer
-            try:
-                self.tokenizer = tiktoken.encoding_for_model(self.model)
-            except KeyError:
-                # If the model is not in tiktoken's presets, use cl100k_base as default
-                self.tokenizer = tiktoken.get_encoding("cl100k_base")
+            self.tokenizer = _init_tokenizer(self.model)
 
             if self.api_type == "azure":
                 self.client = AsyncAzureOpenAI(
@@ -408,7 +470,7 @@ class LLM:
                 "messages": messages,
             }
 
-            if self.model in REASONING_MODELS:
+            if _uses_max_completion_tokens(self.model):
                 params["max_completion_tokens"] = self.max_tokens
             else:
                 params["max_tokens"] = self.max_tokens
@@ -537,9 +599,7 @@ class LLM:
             multimodal_content = (
                 [{"type": "text", "text": content}]
                 if isinstance(content, str)
-                else content
-                if isinstance(content, list)
-                else []
+                else content if isinstance(content, list) else []
             )
 
             # Add images to content
@@ -580,7 +640,7 @@ class LLM:
             }
 
             # Add model-specific parameters
-            if self.model in REASONING_MODELS:
+            if _uses_max_completion_tokens(self.model):
                 params["max_completion_tokens"] = self.max_tokens
             else:
                 params["max_tokens"] = self.max_tokens
@@ -720,7 +780,7 @@ class LLM:
                 **kwargs,
             }
 
-            if self.model in REASONING_MODELS:
+            if _uses_max_completion_tokens(self.model):
                 params["max_completion_tokens"] = self.max_tokens
             else:
                 params["max_tokens"] = self.max_tokens

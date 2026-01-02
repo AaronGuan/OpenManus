@@ -8,7 +8,13 @@ from app.logger import logger
 from app.prompt.browser import NEXT_STEP_PROMPT, SYSTEM_PROMPT
 from app.schema import Message, ToolChoice
 from app.tool import BrowserUseTool, Terminate, ToolCollection
-from app.tool.sandbox.sb_browser_tool import SandboxBrowserTool
+
+# Sandbox browser tool is optional (depends on Daytona). Import lazily so the
+# project can start even when daytona isn't installed/configured.
+try:
+    from app.tool.sandbox.sb_browser_tool import SandboxBrowserTool  # type: ignore
+except Exception:  # pragma: no cover
+    SandboxBrowserTool = None  # type: ignore
 
 
 # Avoid circular import if BrowserAgent needs BrowserContextHelper
@@ -24,6 +30,7 @@ class BrowserContextHelper:
     async def get_browser_state(self) -> Optional[dict]:
         browser_tool = self.agent.available_tools.get_tool(BrowserUseTool().name)
         if not browser_tool:
+            if SandboxBrowserTool is not None:
             browser_tool = self.agent.available_tools.get_tool(
                 SandboxBrowserTool().name
             )
